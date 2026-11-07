@@ -4,14 +4,16 @@ Thanks for your interest! AgentBox is in the pre-MVP stage; see [docs/MVP_Task_L
 
 ## Development
 
-Requirements: Go 1.24+, Docker (Linux engine), Node 22+ (for the UI, later phases).
+Requirements: Go 1.26+, Docker (Linux engine), Node 22+ (for the UI, later phases).
 
 ```bash
 make build   # build all binaries into ./bin
-make test    # go test -race ./...
+make test    # go test -race ./... (the race detector needs cgo; on Windows run it in a Linux container)
 make vet
 make lint    # requires golangci-lint
 ```
+
+Fuzz targets for the policy parser live in `internal/policy` (`go test ./internal/policy -fuzz FuzzParse`).
 
 ## Guidelines
 

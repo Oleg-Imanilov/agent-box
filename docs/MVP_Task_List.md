@@ -53,28 +53,30 @@ Tracking document for the Phase 1 MVP described in [AgentBox_Concept_and_MVP_EN.
   - [x] Output compatibility matrix
 ## Phase 1 — Core services
 
-- [ ] **data-model** — SQLite schema & migrations *(after repo-bootstrap)*
-  - [ ] Tables: `sessions`, `events`, `policies` (versioned, scoped), `approvals`, `policy_history`, `settings`
-  - [ ] Embedded migration runner, pure-Go SQLite driver, WAL mode, persistent named volume
-  - [ ] Repository layer + tests
-- [ ] **policy-engine** — Policy engine *(after repo-bootstrap)*
-  - [ ] Parse/validate YAML/JSON (agent, workspace, network, mcp, audit)
-  - [ ] Inheritance global > agent > session > tool, deny precedence
-  - [ ] Matching: host:port, wildcard, CIDR, tool names
-  - [ ] Decision output includes rule ID + policy version
-  - [ ] Live reload; table-driven and fuzz tests
-- [ ] **audit-core** — Audit/event pipeline *(after data-model)*
-  - [ ] Event model; secret redaction (headers, tokens, keys, MCP args)
-  - [ ] No prompts/file contents by default (explicit opt-in only)
-  - [ ] Async batched SQLite writer; pub/sub for live stream
-  - [ ] JSONL export; retention pruning
-- [ ] **controller-api** — Controller service & API *(after policy-engine, audit-core)*
-  - [ ] REST API: sessions, events, policies, approvals, settings
-  - [ ] SSE/WebSocket live stream
-  - [ ] Authenticated gateway↔controller channel (per-session tokens): decision lookup/cache, event ingest
-  - [ ] Bind to `127.0.0.1`; CSRF/Origin/Host checks; UI auth token
-  - [ ] Fail closed when controller unreachable (gateways deny on error)
+Reference: [controller-api.md](./controller-api.md).
 
+- [x] **data-model** — SQLite schema & migrations *(after repo-bootstrap)*
+  - [x] Tables: `sessions`, `events`, `policies` (versioned, scoped), `approvals`, `policy_history`, `settings`
+  - [x] Embedded migration runner, pure-Go SQLite driver, WAL mode *(persistent volume wiring belongs to `launcher-core`)*
+  - [x] Repository layer + tests
+- [x] **policy-engine** — Policy engine *(after repo-bootstrap)*
+  - [x] Parse/validate YAML/JSON (agent, workspace, network, mcp, audit)
+  - [x] Inheritance global > agent > session > tool, deny precedence
+  - [x] Matching: host:port, wildcard, CIDR, tool names
+  - [x] Decision output includes rule ID + policy version
+  - [x] Live reload; table-driven and fuzz tests
+- [x] **audit-core** — Audit/event pipeline *(after data-model)*
+  - [x] Event model; secret redaction (headers, tokens, keys, MCP args)
+  - [x] No prompts/file contents by default (explicit opt-in only)
+  - [x] Async batched SQLite writer; pub/sub for live stream
+  - [x] JSONL export; retention pruning
+- [x] **controller-api** — Controller service & API *(after policy-engine, audit-core)*
+  - [x] REST API: sessions, events, policies, settings *(approval endpoints move to `approval-flow`; the `approvals` table and store methods exist)*
+  - [x] SSE live stream (resumable with `Last-Event-ID`)
+  - [x] Authenticated gateway↔controller channel (per-session tokens): decision lookup/cache TTL, event ingest; `internal/gwclient` client
+  - [x] Loopback default bind; CSRF/Origin/Host checks; admin bearer token
+  - [x] Fail closed when controller unreachable (gateway client denies on any error) or audit unavailable (controller denies)
+  - [ ] Follow-up: enforce `audit.enabled` / `audit.redact_secrets` per policy (currently always on) — see [Known limits](./controller-api.md#known-limits)
 ## Phase 2 — Gateways
 
 - [ ] **net-gateway** — Network gateway *(after net-spike, controller-api)*
