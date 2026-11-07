@@ -1,0 +1,23 @@
+# Go
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Node / UI
+node_modules/
+web/dist/
+
+# Local state
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
