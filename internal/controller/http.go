@@ -40,11 +40,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/policies/{scope}/history", admin(s.handlePolicyHistory))
 	mux.Handle("GET /v1/settings", admin(s.handleGetSettings))
 	mux.Handle("PUT /v1/settings", admin(s.handlePutSettings))
+	mux.Handle("GET /v1/approvals", admin(s.handleListApprovals))
+	mux.Handle("POST /v1/approvals/decide", admin(s.handleDecideApproval))
 
 	// Gateway API (per-session token).
 	gw := func(h http.HandlerFunc) http.Handler { return s.requireGateway(h) }
 	mux.Handle("POST /v1/gw/decide/network", gw(s.handleDecideNetwork))
 	mux.Handle("POST /v1/gw/decide/mcp", gw(s.handleDecideMCP))
+	mux.Handle("POST /v1/gw/decide/mcp/tools", gw(s.handleDecideMCPTools))
 	mux.Handle("POST /v1/gw/events", gw(s.handleGatewayEvent))
 
 	return s.recoverer(s.baseHeaders(s.hostAndOrigin(mux)))

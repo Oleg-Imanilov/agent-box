@@ -28,3 +28,13 @@ The concept document ([AgentBox_Concept_and_MVP_EN.md](../AgentBox_Concept_and_M
 - The gateway holds provider credentials, so it is a high-value target and must be minimal, non-root and carefully reviewed.
 - Containerized controller + host launcher means a small authenticated launcher↔controller interface is needed (the launcher creates sessions/tokens; the controller never calls Docker).
 - Docker Desktop (macOS/Windows) is usable for development, but only native Linux results count for security claims.
+
+## Addendum: Phase 2 design decisions (2026-11-07)
+
+| # | Decision | Notes |
+| --- | --- | --- |
+| 10 | **No standalone DNS server** | Refines decision 3. Agents resolve nothing: on the isolated network external names do not resolve (network spike), and proxy-aware clients let the gateway resolve names. The gateway's own resolver is policy-checked, logged and rebinding-safe. A DNS server would add a tunneling channel for no benefit. |
+| 11 | **LLM credentials injected by reverse-proxy routes** | Without TLS interception a CONNECT tunnel cannot be modified, so the agent's LLM base URL points at `http://netgw/llm/<provider>` (plain HTTP inside the isolated network) and the gateway adds the real key. The agent only holds a dummy key. |
+| 12 | **"Persist" approvals are saved in agent scope** | A persisted approval allows that exact destination/tool for this agent in all sessions; "session" approvals live in the session scope. Explicit deny rules can never be approved. |
+| 13 | **Own Go stdio bridge** | Minimal, auditable code instead of wrapping a third-party Node gateway; it adds bearer auth, a minimal child environment, ID namespacing and fail-closed exit. |
+| 14 | **Approval timeouts are configurable per entity type** | Network (default 60 s) and MCP (default 120 s), 5–600 s, via settings. |

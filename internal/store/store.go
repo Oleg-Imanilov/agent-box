@@ -53,6 +53,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "foreign_keys(ON)")
 	q.Add("_pragma", "synchronous(NORMAL)")
+	// Transactions that read before writing (PutPolicy) would otherwise fail
+	// immediately with SQLITE_BUSY when another connection commits first;
+	// taking the write lock at BEGIN lets busy_timeout queue them instead.
+	q.Set("_txlock", "immediate")
 	dsn := "file:" + filepath.ToSlash(path) + "?" + q.Encode()
 
 	db, err := sql.Open("sqlite", dsn)

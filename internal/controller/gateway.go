@@ -3,8 +3,10 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Oleg-Imanilov/agent-box/internal/audit"
@@ -29,12 +31,18 @@ type decideNetworkReq struct {
 	Host      string `json:"host"`
 	Port      int    `json:"port"`
 	Operation string `json:"operation"`
+	// Ask requests human approval when the request is denied only because no
+	// rule allows it. RequestID identifies the logical request (idempotency).
+	Ask       bool   `json:"ask"`
+	RequestID string `json:"request_id"`
 }
 
 type decideMCPReq struct {
 	Server    string `json:"server"`
 	Tool      string `json:"tool"`
 	Operation string `json:"operation"`
+	Ask       bool   `json:"ask"`
+	RequestID string `json:"request_id"`
 }
 
 func (s *Server) respondDecision(w http.ResponseWriter, sess store.Session, kind, destination, operation string, d policy.Decision, started time.Time) {
@@ -48,10 +56,17 @@ func (s *Server) respondDecision(w http.ResponseWriter, sess store.Session, kind
 		s.log.Error("audit unavailable; denying", "kind", kind, "err", err)
 		resp.Effect, resp.RuleID, resp.Reason = policy.Deny, RuleAuditUnavailable, "audit trail unavailable"
 	}
-	if resp.Effect == policy.Allow && s.cfg.AllowCacheTTL > 0 {
+	// Approval outcomes are never cached: "once" must not outlive its request.
+	if resp.Effect == policy.Allow && s.cfg.AllowCacheTTL > 0 && !strings.HasPrefix(resp.RuleID, "approval:") {
 		resp.CacheTTLSeconds = int(s.cfg.AllowCacheTTL / time.Second)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// wantsApproval reports whether an ask is permitted for d. Only a plain
+// default-deny can be escalated; explicit deny rules can never be approved.
+func wantsApproval(ask bool, d policy.Decision) bool {
+	return ask && d.Effect == policy.Deny && d.RuleID == policy.RuleDefaultDeny
 }
 
 func (s *Server) handleDecideNetwork(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +79,16 @@ func (s *Server) handleDecideNetwork(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "host or operation too long")
 		return
 	}
+	if req.Ask && !validClientRequestID(req.RequestID) {
+		writeError(w, http.StatusBadRequest, "request_id (8-64 chars of A-Za-z0-9_-) is required when ask is true")
+		return
+	}
 	sess := sessionFrom(r)
 	d := s.eng.EvaluateNetwork(policy.Subject{Agent: sess.Agent, Session: sess.ID}, req.Host, req.Port)
-	dest := req.Host + ":" + strconv.Itoa(req.Port)
+	dest := net.JoinHostPort(strings.ToLower(req.Host), strconv.Itoa(req.Port))
+	if wantsApproval(req.Ask, d) {
+		d = s.askApproval(r.Context(), sess, audit.KindNetwork, dest, req.RequestID, d)
+	}
 	op := req.Operation
 	if op == "" {
 		op = "connect"
@@ -84,13 +106,68 @@ func (s *Server) handleDecideMCP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "server, tool or operation too long")
 		return
 	}
+	if req.Ask && !validClientRequestID(req.RequestID) {
+		writeError(w, http.StatusBadRequest, "request_id (8-64 chars of A-Za-z0-9_-) is required when ask is true")
+		return
+	}
 	sess := sessionFrom(r)
 	d := s.eng.EvaluateMCPTool(policy.Subject{Agent: sess.Agent, Session: sess.ID}, req.Server, req.Tool)
+	subject := req.Server + "/" + req.Tool
+	if wantsApproval(req.Ask, d) {
+		d = s.askApproval(r.Context(), sess, audit.KindMCP, subject, req.RequestID, d)
+	}
 	op := req.Operation
 	if op == "" {
 		op = "tools/call"
 	}
-	s.respondDecision(w, sess, audit.KindMCP, req.Server+"/"+req.Tool, op, d, started)
+	s.respondDecision(w, sess, audit.KindMCP, subject, op, d, started)
+}
+
+type decideToolsReq struct {
+	Server string   `json:"server"`
+	Tools  []string `json:"tools"`
+}
+
+type toolDecision struct {
+	Tool   string        `json:"tool"`
+	Effect policy.Effect `json:"effect"`
+	RuleID string        `json:"rule_id"`
+}
+
+// handleDecideMCPTools evaluates many tool names at once, so a gateway can
+// filter a tools/list response. It writes a single summary audit event.
+func (s *Server) handleDecideMCPTools(w http.ResponseWriter, r *http.Request) {
+	var req decideToolsReq
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Server == "" || len(req.Server) > 128 || len(req.Tools) > 1000 {
+		writeError(w, http.StatusBadRequest, "server is required (max 128 chars) and at most 1000 tools")
+		return
+	}
+	sess := sessionFrom(r)
+	subj := policy.Subject{Agent: sess.Agent, Session: sess.ID}
+	out := make([]toolDecision, 0, len(req.Tools))
+	version, allowed := "", 0
+	for _, tool := range req.Tools {
+		if len(tool) > 256 {
+			writeError(w, http.StatusBadRequest, "tool name too long")
+			return
+		}
+		d := s.eng.EvaluateMCPTool(subj, req.Server, tool)
+		version = d.PolicyVersion
+		if d.Allowed() {
+			allowed++
+		}
+		out = append(out, toolDecision{Tool: tool, Effect: d.Effect, RuleID: d.RuleID})
+	}
+	if err := s.audit.Log(audit.Entry{SessionID: sess.ID, Kind: audit.KindMCP, Destination: req.Server, Operation: "tools/list",
+		Decision: audit.DecisionInfo, PolicyVersion: version,
+		Metadata: map[string]any{"agent": sess.Agent, "total": len(req.Tools), "allowed": allowed, "hidden": len(req.Tools) - allowed}}); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "audit unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"policy_version": version, "decisions": out})
 }
 
 type gatewayEventReq struct {

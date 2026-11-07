@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -159,6 +160,10 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	s.polMu.Lock()
 	s.eng.Remove(policy.SessionScope(id))
 	s.polMu.Unlock()
+	if _, err := s.st.ExpireSessionApprovals(r.Context(), id); err != nil {
+		s.log.Error("expire session approvals", "err", err)
+	}
+	s.hub.wakePrefix(id + "/")
 	s.logAdmin(audit.Entry{SessionID: id, Kind: audit.KindSession, Operation: "session.end", Decision: audit.DecisionInfo})
 	writeJSON(w, http.StatusOK, sess)
 }
@@ -369,18 +374,34 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) settingsView(ctx context.Context) map[string]any {
 	days := 0
 	include := false
+	netTimeout, mcpTimeout := DefaultApprovalTimeoutNetwork, DefaultApprovalTimeoutMCP
 	if all, err := s.st.AllSettings(ctx); err == nil {
 		if n, err := parseSmallInt(all[SettingRetentionDays]); err == nil {
 			days = n
 		}
 		include = all[SettingIncludeContent] == "true"
+		if n, err := parseSmallInt(all[SettingApprovalTimeoutNetwork]); err == nil {
+			netTimeout = n
+		}
+		if n, err := parseSmallInt(all[SettingApprovalTimeoutMCP]); err == nil {
+			mcpTimeout = n
+		}
 	}
-	return map[string]any{SettingRetentionDays: days, SettingIncludeContent: include}
+	return map[string]any{
+		SettingRetentionDays: days, SettingIncludeContent: include,
+		SettingApprovalTimeoutNetwork: netTimeout, SettingApprovalTimeoutMCP: mcpTimeout,
+	}
 }
 
 type settingsReq struct {
-	AuditRetentionDays *int  `json:"audit_retention_days"`
-	IncludeContent     *bool `json:"include_content"`
+	AuditRetentionDays     *int  `json:"audit_retention_days"`
+	IncludeContent         *bool `json:"include_content"`
+	ApprovalTimeoutNetwork *int  `json:"approval_timeout_network_seconds"`
+	ApprovalTimeoutMCP     *int  `json:"approval_timeout_mcp_seconds"`
+}
+
+func validTimeout(v *int) bool {
+	return v == nil || (*v >= minApprovalTimeoutSeconds && *v <= maxApprovalTimeoutSeconds)
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
@@ -392,18 +413,29 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "audit_retention_days must be between 0 and 3650 (0 = keep forever)")
 		return
 	}
-	ctx := r.Context()
-	if req.AuditRetentionDays != nil {
-		if err := s.st.SetSetting(ctx, SettingRetentionDays, strconv.Itoa(*req.AuditRetentionDays)); err != nil {
-			writeError(w, http.StatusInternalServerError, "database error")
-			return
-		}
+	if !validTimeout(req.ApprovalTimeoutNetwork) || !validTimeout(req.ApprovalTimeoutMCP) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("approval timeouts must be between %d and %d seconds", minApprovalTimeoutSeconds, maxApprovalTimeoutSeconds))
+		return
 	}
-	if req.IncludeContent != nil {
-		if err := s.st.SetSetting(ctx, SettingIncludeContent, strconv.FormatBool(*req.IncludeContent)); err != nil {
+	ctx := r.Context()
+	set := func(key, val string) bool {
+		if err := s.st.SetSetting(ctx, key, val); err != nil {
 			writeError(w, http.StatusInternalServerError, "database error")
-			return
+			return false
 		}
+		return true
+	}
+	if req.AuditRetentionDays != nil && !set(SettingRetentionDays, strconv.Itoa(*req.AuditRetentionDays)) {
+		return
+	}
+	if req.IncludeContent != nil && !set(SettingIncludeContent, strconv.FormatBool(*req.IncludeContent)) {
+		return
+	}
+	if req.ApprovalTimeoutNetwork != nil && !set(SettingApprovalTimeoutNetwork, strconv.Itoa(*req.ApprovalTimeoutNetwork)) {
+		return
+	}
+	if req.ApprovalTimeoutMCP != nil && !set(SettingApprovalTimeoutMCP, strconv.Itoa(*req.ApprovalTimeoutMCP)) {
+		return
 	}
 	if err := s.applySettings(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "database error")

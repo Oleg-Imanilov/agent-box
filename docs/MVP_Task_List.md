@@ -79,30 +79,33 @@ Reference: [controller-api.md](./controller-api.md).
   - [ ] Follow-up: enforce `audit.enabled` / `audit.redact_secrets` per policy (currently always on) — see [Known limits](./controller-api.md#known-limits)
 ## Phase 2 — Gateways
 
-- [ ] **net-gateway** — Network gateway *(after net-spike, controller-api)*
-  - [ ] HTTP proxy + CONNECT handler with per-connection policy check
-  - [ ] DNS resolver: policy-checked, logged, blocks private/loopback/link-local/metadata results, rebinding protection
-  - [ ] Log host/SNI metadata only (no TLS interception)
-  - [ ] Harden gateway's own egress (deny RFC1918, metadata, Docker API)
-  - [ ] Inject LLM provider credentials
-  - [ ] Fail closed
-- [ ] **mcp-gateway** — MCP gateway (Streamable HTTP) *(after mcp-spike, controller-api)*
-  - [ ] Proxy POST + SSE with session IDs; parse JSON-RPC
-  - [ ] Enforce allow/deny on `tools/call` before forwarding; filter `tools/list`
-  - [ ] Redacted argument logging; approval hook
-  - [ ] Upstream credentials stay in gateway; per-server config; remote MCP support
-  - [ ] Size/time limits; fail closed on parse errors
-- [ ] **mcp-stdio-bridge** — stdio MCP bridge/sidecar *(after mcp-gateway)*
-  - [ ] Run stdio servers in separate isolated containers (non-root, cap-drop, limited network/mounts, scoped credentials)
-  - [ ] Bridge exposes them as Streamable HTTP to the MCP gateway; launcher manages lifecycle
-  - [ ] Examples: filesystem (scoped read-only mount), GitHub, PostgreSQL (scoped DB user)
-  - [ ] Test: agent cannot reach MCP server containers directly
-- [ ] **approval-flow** — Dynamic approvals *(after net-gateway, mcp-gateway)*
-  - [ ] Pending-approval queue; gateway holds request with timeout → deny
-  - [ ] Decisions: allow once / session / persist rule / deny; stored with actor + expiry
-  - [ ] Request IDs and idempotency; no auto-replay of blocked side-effecting operations
-  - [ ] Works for both network destinations and MCP tools
+Reference: [gateways.md](./gateways.md).
 
+- [x] **net-gateway** — Network gateway *(after net-spike, controller-api)*
+  - [x] HTTP proxy + CONNECT handler with per-connection policy check
+  - [x] Name resolution by the gateway only (agents cannot resolve names on the isolated network, so no separate DNS server — decision recorded in ADR-0001 addendum); policy-checked, logged; blocks private/loopback/link-local/metadata results unless an explicit IP rule allows them; rebinding protection by dialing the validated IP
+  - [x] Log host/port metadata only (no TLS interception); closed-tunnel byte counts
+  - [x] Harden gateway's own egress (restricted-address classes, Docker API/metadata via the same guard, socket-level address re-check)
+  - [x] Inject LLM provider credentials via `/llm/<provider>/` reverse-proxy routes
+  - [x] Fail closed
+- [x] **mcp-gateway** — MCP gateway (Streamable HTTP) *(after mcp-spike, controller-api)*
+  - [x] Proxy POST + SSE with gateway-minted session IDs; strict JSON-RPC parsing (duplicate/case-variant keys, batches rejected)
+  - [x] Enforce allow/deny on `tools/call` before forwarding; filter `tools/list` (JSON and SSE)
+  - [x] Redacted argument logging (decision events carry no arguments); approval hook
+  - [x] Upstream credentials stay in gateway; per-server config; remote MCP support
+  - [x] Size/time limits; fail closed on parse errors; server-initiated requests blocked
+- [x] **mcp-stdio-bridge** — stdio MCP bridge/sidecar *(after mcp-gateway)*
+  - [x] Own Go bridge (`cmd/mcpbridge`): bearer auth, minimal child environment, ID namespacing, stdout quarantine, fail-closed on child exit
+  - [x] Exposes stdio servers as Streamable HTTP to the MCP gateway; image recipe in `deploy/Dockerfile.mcp-node`
+  - [ ] Launcher manages container lifecycle and applies the isolation flags (non-root, cap-drop, MCP network only, scoped credentials) — moved to `launcher-core` / `sandbox-hardening`
+  - [ ] Examples: filesystem, GitHub, PostgreSQL sidecar configs — with the adapters
+  - [ ] Test: agent cannot reach MCP server containers directly — needs the launcher's network layout (`neg-tests`)
+- [x] **approval-flow** — Dynamic approvals *(after net-gateway, mcp-gateway)*
+  - [x] Pending-approval queue; held requests return after the decision or the per-entity timeout (network 60 s, MCP 120 s, configurable) → deny
+  - [x] Decisions: allow once / session / persist (agent scope) / deny; stored with actor + expiry; admin API `GET /v1/approvals`, `POST /v1/approvals/decide`
+  - [x] Request IDs and idempotency, session-namespaced; no auto-replay (the original held request proceeds, nothing is re-sent)
+  - [x] Works for both network destinations and MCP tools; explicit deny rules are never escalated
+  - [ ] UI prompt for pending approvals — `ui-screens`
 ## Phase 3 — Launcher & sandbox
 
 - [ ] **launcher-core** — Launcher/CLI core *(after repo-bootstrap, net-spike)*

@@ -39,7 +39,9 @@ The controller runs in a container on the control network (never on the agent ne
 | `GET /v1/events/stream` | Server-Sent Events; same filters. Resumable with `Last-Event-ID` (replays missed events, then streams live). Use `fetch` streaming from the UI, since `EventSource` cannot send the `Authorization` header. |
 | `GET /v1/policies`, `GET /v1/policies/{scope}`, `GET /v1/policies/{scope}/history` | Read policies and their version history. |
 | `PUT /v1/policies/{scope}` | Body: policy as YAML or JSON. Validated, stored as a new version, and applied to the **next** decision. Invalid policies are rejected and change nothing. |
-| `GET /v1/settings`, `PUT /v1/settings` | `audit_retention_days` (0–3650, 0 = keep forever) and `include_content` (default `false`). |
+| `GET /v1/settings`, `PUT /v1/settings` | `audit_retention_days` (0–3650, 0 = keep forever), `include_content` (default `false`), and the approval wait per entity type: `approval_timeout_network_seconds` (default 60) and `approval_timeout_mcp_seconds` (default 120), each 5–600. |
+| `GET /v1/approvals[?status=pending\|decided\|expired\|all]` | Approval requests, pending by default. Also announced live as `approval` events on the event stream. |
+| `POST /v1/approvals/decide` | Body `{"request_id", "decision"}` with decision `once`, `session`, `persist` or `deny`. `session` adds an allow rule to the session policy, `persist` to the agent policy; both apply to later requests through the normal engine. Decisions are never overwritten (`409`). |
 
 `{scope}` is `global`, `agent:<name>` or `session:<id>`. A session-scoped policy requires an active session.
 
@@ -47,12 +49,14 @@ The controller runs in a container on the control network (never on the agent ne
 
 | Method and path | Request | Response |
 | --- | --- | --- |
-| `POST /v1/gw/decide/network` | `{"host","port","operation"?}` | `{"effect","rule_id","policy_version","reason"?,"cache_ttl_seconds"}` |
-| `POST /v1/gw/decide/mcp` | `{"server","tool","operation"?}` | same |
+| `POST /v1/gw/decide/network` | `{"host","port","operation"?,"ask"?,"request_id"?}` | `{"effect","rule_id","policy_version","reason"?,"cache_ttl_seconds"}` |
+| `POST /v1/gw/decide/mcp` | `{"server","tool","operation"?,"ask"?,"request_id"?}` | same |
+| `POST /v1/gw/decide/mcp/tools` | `{"server","tools":[...]}` (up to 1000) | `{"policy_version","decisions":[{"tool","effect","rule_id"}]}`; one summary audit event. Used to filter `tools/list`. |
 | `POST /v1/gw/events` | `{"kind": network\|dns\|mcp, "decision": allow\|deny\|error\|info, "destination"?, "operation"?, "rule_id"?, "policy_version"?, "metadata"?}` | `202` |
 
 - Every decision is **audited by the controller** with the session ID, rule ID and policy versions, so a gateway cannot forget to log one. The session always comes from the token; clients cannot name another session.
 - **Fail closed:** if the audit trail cannot record a decision, the response is `deny` with rule `audit-unavailable`.
+- **Approvals (`ask: true`).** If, and only if, a request is denied by *default* (no rule matched), the controller creates an approval and holds the HTTP response until a user decides, the per-entity timeout expires (deny, rule `approval-timeout`), or the caller disconnects. Explicit deny rules are never escalated. `request_id` (8–64 chars of `A-Za-z0-9_-`) makes the request idempotent: the same id returns the stored decision without prompting again, and it is namespaced by session so one session cannot read or influence another's approvals. At most 20 approvals may be pending per session (`approval-queue-full`). `once` allows only that request (never cached by gateways). Ending a session releases its waiters with a deny, and pending approvals do not survive a controller restart.
 - `internal/gwclient` is the client for gateways. Any error (timeout, non-200, malformed body, redirect) yields `deny`. A cached *allow* is only served within the TTL the controller itself returned.
 
 ## Policy format
@@ -102,4 +106,4 @@ Each event has: `id`, `session_id`, `ts`, `kind` (`network`, `dns`, `mcp`, `poli
 
 ## Persistence
 
-SQLite (pure Go driver, WAL) with embedded, versioned migrations. Tables: `sessions`, `events`, `policies`, `policy_history`, `approvals` (used by the Phase 2 approval flow), `settings`. Policies, history and audit events survive restarts; session-scoped policies are only restored for sessions that are still active.
+SQLite (pure Go driver, WAL) with embedded, versioned migrations. Tables: `sessions`, `events`, `policies`, `policy_history`, `approvals`, `settings`. Policies, history and audit events survive restarts; session-scoped policies are only restored for sessions that are still active.

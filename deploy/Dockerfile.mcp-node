@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+#
+# Wraps an npm-distributed stdio MCP server with the AgentBox bridge so it can
+# run in its own isolated container behind the MCP gateway.
+#
+#   docker build -f deploy/Dockerfile.mcp-node \
+#     --build-arg MCP_PACKAGE=@modelcontextprotocol/server-filesystem@<pinned version> \
+#     -t agentbox/mcp-filesystem .
+#
+# Always pin MCP_PACKAGE to an exact version: the package is installed at build
+# time so the running container needs no network access to download code.
+#
+# Run with the flags the launcher applies to every MCP sidecar:
+#   --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only
+#   --tmpfs /tmp --pids-limit 256 --memory 512m
+#   attached ONLY to the MCP network (never the agent network),
+#   AGENTBOX_BRIDGE_TOKEN_FILE=/run/secrets/bridge-token
+#   AGENTBOX_BRIDGE_ENV_FILE_<NAME>=/run/secrets/<server credential>   (scoped, least privilege)
+# and the server command as arguments, e.g.:  mcp-server-filesystem /workspace
+
+FROM golang:1.26 AS build
+ARG VERSION=0.0.0-dev
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X github.com/Oleg-Imanilov/agent-box/internal/version.Version=${VERSION}" \
+    -o /out/mcpbridge ./cmd/mcpbridge
+
+FROM node:22-slim
+ARG MCP_PACKAGE
+RUN test -n "$MCP_PACKAGE" && npm install -g --omit=dev "$MCP_PACKAGE" \
+ && npm cache clean --force
+COPY --from=build /out/mcpbridge /usr/local/bin/mcpbridge
+USER node
+ENTRYPOINT ["/usr/local/bin/mcpbridge", "--"]
+HEALTHCHECK --interval=10s --timeout=4s --start-period=10s --retries=3 CMD ["/usr/local/bin/mcpbridge", "healthcheck"]

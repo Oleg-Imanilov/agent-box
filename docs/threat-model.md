@@ -86,6 +86,9 @@ Boundaries that AgentBox must enforce:
 | TM22 | Replay of blocked side-effecting operation after approval | Request IDs, idempotency, no auto-replay | `approval-flow` |
 | TM23 | Supply chain (images, deps) | Pinned image digests, `govulncheck`, `npm audit`, dependency review, SBOM, signed releases | `repo-bootstrap`, `packaging` |
 | TM24 | Resource exhaustion (fork bombs, disk, CPU, connection floods) | cgroup limits on agent; connection/rate limits in gateways | `sandbox-hardening`, gateways |
+| TM25 | JSON parser differential: a message that the MCP gateway reads as an allowed call but the MCP server reads as a denied one (duplicate keys, case-variant keys, trailing data, batches) | Gateway rejects duplicate keys, case-variants of protocol keys, trailing data and batches, and decodes case-sensitively | `mcpgw` tests incl. mutation-checked cases and fuzzing |
+| TM26 | Restricted address reached through an allowed name (rebinding/SSRF via the network gateway) | Gateway resolves names itself; restricted IP classes need an explicit IP rule; dials the validated IP and re-checks it at socket level | `netgw` tests; `neg-tests` |
+| TM27 | Server-initiated MCP requests (sampling, elicitation, roots) used to drive the agent or extract data | Dropped by the MCP gateway; server gets an error reply | `mcpgw` tests |
 
 ## 5. Scope
 

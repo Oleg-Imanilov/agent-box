@@ -10,6 +10,8 @@ package gwclient
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,7 +49,10 @@ type Decision struct {
 type Options struct {
 	// Timeout bounds each request (default 3s).
 	Timeout time.Duration
-	// HTTPClient overrides the HTTP client (tests).
+	// ApprovalWait bounds requests that wait for a human decision (default 11m,
+	// above the controller's maximum approval timeout).
+	ApprovalWait time.Duration
+	// HTTPClient overrides the HTTP client for ordinary requests (tests).
 	HTTPClient *http.Client
 	// Now overrides the clock (tests).
 	Now func() time.Time
@@ -58,6 +63,7 @@ type Client struct {
 	base  string
 	token string
 	hc    *http.Client
+	askHC *http.Client
 	now   func() time.Time
 
 	mu    sync.Mutex
@@ -79,22 +85,28 @@ func New(baseURL, token string, opt Options) (*Client, error) {
 		return nil, errors.New("gwclient: empty token")
 	}
 	hc := opt.HTTPClient
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	if hc == nil {
 		to := opt.Timeout
 		if to <= 0 {
 			to = 3 * time.Second
 		}
-		hc = &http.Client{
-			Timeout: to,
-			// A controller response must never redirect the token elsewhere.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		}
+		// A controller response must never redirect the token elsewhere.
+		hc = &http.Client{Timeout: to, CheckRedirect: noRedirect}
+	}
+	wait := opt.ApprovalWait
+	if wait <= 0 {
+		wait = 11 * time.Minute
+	}
+	askHC := &http.Client{Timeout: wait, CheckRedirect: noRedirect}
+	if opt.HTTPClient != nil {
+		askHC = opt.HTTPClient
 	}
 	now := opt.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Client{base: u.String(), token: token, hc: hc, now: now, cache: map[string]cached{}}, nil
+	return &Client{base: u.String(), token: token, hc: hc, askHC: askHC, now: now, cache: map[string]cached{}}, nil
 }
 
 type decisionBody struct {
@@ -118,7 +130,20 @@ func (c *Client) DecideNetwork(ctx context.Context, host string, port int) Decis
 	if d, ok := c.lookup(key); ok {
 		return d
 	}
-	return c.decide(ctx, key, "/v1/gw/decide/network", map[string]any{"host": host, "port": port})
+	return c.decide(ctx, c.hc, key, "/v1/gw/decide/network", map[string]any{"host": host, "port": port})
+}
+
+// DecideNetworkAsk is like DecideNetwork, but if the destination is denied
+// only because no rule allows it, the controller asks a human and this call
+// blocks until they answer (or the approval times out, which denies).
+// requestID must be unique per logical request; use NewRequestID.
+func (c *Client) DecideNetworkAsk(ctx context.Context, host string, port int, requestID string) Decision {
+	key := "net|" + host + "|" + strconv.Itoa(port)
+	if d, ok := c.lookup(key); ok {
+		return d
+	}
+	return c.decide(ctx, c.askHC, key, "/v1/gw/decide/network",
+		map[string]any{"host": host, "port": port, "ask": true, "request_id": requestID})
 }
 
 // DecideMCP asks whether tool may be called on the named MCP server.
@@ -127,7 +152,60 @@ func (c *Client) DecideMCP(ctx context.Context, server, tool string) Decision {
 	if d, ok := c.lookup(key); ok {
 		return d
 	}
-	return c.decide(ctx, key, "/v1/gw/decide/mcp", map[string]any{"server": server, "tool": tool})
+	return c.decide(ctx, c.hc, key, "/v1/gw/decide/mcp", map[string]any{"server": server, "tool": tool})
+}
+
+// DecideMCPAsk is the approval-capable variant of DecideMCP.
+func (c *Client) DecideMCPAsk(ctx context.Context, server, tool, requestID string) Decision {
+	key := "mcp|" + server + "|" + tool
+	if d, ok := c.lookup(key); ok {
+		return d
+	}
+	return c.decide(ctx, c.askHC, key, "/v1/gw/decide/mcp",
+		map[string]any{"server": server, "tool": tool, "ask": true, "request_id": requestID})
+}
+
+// DecideMCPTools evaluates many tool names at once (for tools/list
+// filtering). On any error it returns an error and callers must treat every
+// tool as denied.
+func (c *Client) DecideMCPTools(ctx context.Context, server string, tools []string) (map[string]policy.Decision, error) {
+	resp, err := c.post(ctx, c.hc, "/v1/gw/decide/mcp/tools", map[string]any{"server": server, "tools": tools})
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
+		return nil, fmt.Errorf("controller returned %d", resp.StatusCode)
+	}
+	var body struct {
+		PolicyVersion string `json:"policy_version"`
+		Decisions     []struct {
+			Tool   string        `json:"tool"`
+			Effect policy.Effect `json:"effect"`
+			RuleID string        `json:"rule_id"`
+		} `json:"decisions"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4*maxResponseBytes)).Decode(&body); err != nil {
+		return nil, err
+	}
+	out := make(map[string]policy.Decision, len(body.Decisions))
+	for _, d := range body.Decisions {
+		if d.Effect != policy.Allow && d.Effect != policy.Deny {
+			return nil, fmt.Errorf("unknown effect %q", d.Effect)
+		}
+		out[d.Tool] = policy.Decision{Effect: d.Effect, RuleID: d.RuleID, PolicyVersion: body.PolicyVersion}
+	}
+	return out, nil
+}
+
+// NewRequestID returns a random identifier for approval requests.
+func NewRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("gwclient: entropy unavailable: " + err.Error())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Event is an additional audit record a gateway can report.
@@ -144,7 +222,7 @@ type Event struct {
 // ReportEvent sends an audit event. Callers should treat an error as "audit
 // unavailable" and, for enforcement events, deny.
 func (c *Client) ReportEvent(ctx context.Context, e Event) error {
-	resp, err := c.post(ctx, "/v1/gw/events", e)
+	resp, err := c.post(ctx, c.hc, "/v1/gw/events", e)
 	if err != nil {
 		return err
 	}
@@ -156,7 +234,7 @@ func (c *Client) ReportEvent(ctx context.Context, e Event) error {
 	return nil
 }
 
-func (c *Client) post(ctx context.Context, path string, body any) (*http.Response, error) {
+func (c *Client) post(ctx context.Context, hc *http.Client, path string, body any) (*http.Response, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -167,11 +245,11 @@ func (c *Client) post(ctx context.Context, path string, body any) (*http.Respons
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "application/json")
-	return c.hc.Do(req)
+	return hc.Do(req)
 }
 
-func (c *Client) decide(ctx context.Context, key, path string, body any) Decision {
-	resp, err := c.post(ctx, path, body)
+func (c *Client) decide(ctx context.Context, hc *http.Client, key, path string, body any) Decision {
+	resp, err := c.post(ctx, hc, path, body)
 	if err != nil {
 		return denyOnError(RuleControllerUnavailable, err)
 	}

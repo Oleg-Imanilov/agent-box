@@ -64,6 +64,7 @@ type Server struct {
 	adminDigest [sha256.Size]byte
 
 	polMu sync.Mutex // serializes store+engine policy updates
+	hub   approvalHub
 }
 
 // New creates a Server.
@@ -94,6 +95,11 @@ func New(cfg Config, st *store.Store, eng *policy.Engine, al *audit.Logger) (*Se
 // LoadState loads persisted policies into the engine and applies persisted
 // settings. Session-scoped policies are only loaded for active sessions.
 func (s *Server) LoadState(ctx context.Context) error {
+	// Requests waiting on approvals died with the previous process; expire
+	// them so the queue does not show stale items.
+	if _, err := s.st.ExpireApprovals(ctx, time.Now().AddDate(100, 0, 0)); err != nil {
+		return err
+	}
 	recs, err := s.st.ListPolicies(ctx)
 	if err != nil {
 		return err
